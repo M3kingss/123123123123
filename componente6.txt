@@ -1,0 +1,550 @@
+6. Componente QR Code - client/src/components/whatsapp/QRCodeDisplay.tsx
+
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { startWhatsappSession, getQRCode } from "@/lib/api";
+import { websocketClient } from "@/lib/websocket";
+import { useToast } from "@/hooks/use-toast";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Progress } from "@/components/ui/progress";
+import { 
+  Loader2, 
+  QrCode, 
+  Smartphone, 
+  Copy, 
+  RefreshCw, 
+  CheckCircle2, 
+  HelpCircle, 
+  Info, 
+  MessageSquare,
+  AlertTriangle 
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+
+interface QRCodeScannerProps {
+  onConnected?: () => void;
+}
+
+export default function QRCodeScanner({ onConnected }: QRCodeScannerProps) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [connectionId, setConnectionId] = useState<number | null>(null);
+  const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [name, setName] = useState("");
+  const [timeLeft, setTimeLeft] = useState(180);
+  const [connectionStatus, setConnectionStatus] = useState("disconnected");
+  const [activeTab, setActiveTab] = useState("standard");
+
+  // Calcular porcentagem de tempo restante
+  const timeLeftPercentage = (timeLeft / 180) * 100;
+
+  // Start a WhatsApp session
+  const startSessionMutation = useMutation({
+    mutationFn: startWhatsappSession,
+    onSuccess: (data) => {
+      setConnectionId(data.connectionId);
+      
+      // Verificar se a conexão já está ativa
+      fetch(`/api/whatsapp/connections`)
+        .then(res => res.json())
+        .then(connections => {
+          const ourConnection = connections.find((conn: any) => conn.id === data.connectionId);
+          if (ourConnection && ourConnection.status === 'connected') {
+            console.log("Conexão já está ativa, fechando modal:", ourConnection);
+            setConnectionStatus('connected');
+            
+            toast({
+              title: "WhatsApp já conectado",
+              description: "Seu número de WhatsApp já está conectado ao sistema!",
+            });
+            
+            // Fechar o modal após um breve atraso
+            setTimeout(() => {
+              if (onConnected) {
+                onConnected();
+              }
+            }, 1500);
+          } else {
+            toast({
+              title: "Sessão iniciada",
+              description: "Escaneie o QR Code para conectar seu WhatsApp",
+            });
+          }
+        })
+        .catch(err => {
+          console.error("Erro verificando status da conexão:", err);
+          toast({
+            title: "Sessão iniciada",
+            description: "Escaneie o QR Code para conectar seu WhatsApp",
+          });
+        });
+    },
+    onError: (error) => {
+      toast({
+        title: "Erro ao iniciar sessão",
+        description: `Ocorreu um erro: ${error}`,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Fetch QR code if connection ID is available
+  const { data: qrCodeData, refetch: refetchQrCode, error: qrCodeError, isRefetching } = useQuery({
+    queryKey: [`/api/whatsapp/qrcode/${connectionId}`],
+    queryFn: () => getQRCode(connectionId as number),
+    enabled: !!connectionId && connectionStatus !== "connected",
+    refetchInterval: timeLeft > 0 ? 5000 : false, // Refetch every 5 seconds if time left
+    retry: false // Disable retries to avoid excessive error messages
+  });
+  
+  // Efeito para lidar com erros no QR code
+  useEffect(() => {
+    if (!qrCodeError) return;
+    
+    console.log("Erro ao obter QR code:", qrCodeError);
+    // Se o erro for porque o QR code não está disponível (conexão já autenticada)
+    if (qrCodeError instanceof Error && 
+        qrCodeError.message && 
+        qrCodeError.message.includes("QR code not available")) {
+      console.log("QR code não disponível, possível conexão já estabelecida");
+      // Verificar se a conexão está estabelecida
+      fetch(`/api/whatsapp/connections`)
+        .then(res => res.json())
+        .then(connections => {
+          const ourConnection = connections.find((conn: any) => conn.id === connectionId);
+          if (ourConnection && ourConnection.status === 'connected') {
+            console.log("Conexão confirmada como ativa, atualizando estado");
+            setConnectionStatus('connected');
+          }
+        })
+        .catch(err => {
+          console.error("Erro verificando status das conexões:", err);
+        });
+    }
+  }, [qrCodeError, connectionId]);
+
+  // Update QR code URL when data changes
+  useEffect(() => {
+    if (qrCodeData?.qrCode) {
+      setQrCodeUrl(qrCodeData.qrCode);
+      // Reset timer when new QR code is received
+      setTimeLeft(180);
+    }
+    
+    // Store any additional QR code data formats if available
+    if (qrCodeData?.qrCodeData) {
+      // We'll keep using qrCodeUrl for backward compatibility
+      console.log("Multiple QR Code formats available:", qrCodeData.qrCodeData);
+    }
+  }, [qrCodeData]);
+
+  // Setup WebSocket listener for connection status
+  useEffect(() => {
+    if (!connectionId) return;
+
+    const handleWebSocketMessage = (data: any) => {
+      console.log("WebSocket message received:", data);
+      
+      // Check for whatsapp_status events
+      if (data.type === "whatsapp_status" && data.connectionId === connectionId) {
+        console.log("Status change event for our connection:", data);
+        setConnectionStatus(data.status);
+        
+        if (data.status === "connected") {
+          toast({
+            title: "WhatsApp conectado",
+            description: "Seu número de WhatsApp foi conectado com sucesso!",
+          });
+          
+          // Refresh connections list
+          queryClient.invalidateQueries({ queryKey: ['/api/whatsapp/connections'] });
+          
+          // Importante: não executamos o callback imediatamente para dar tempo do toast aparecer
+          // O callback será executado pelo useEffect abaixo que monitora mudanças no connectionStatus
+        }
+      }
+    };
+
+    websocketClient.addMessageListener(handleWebSocketMessage);
+
+    return () => {
+      websocketClient.removeMessageListener(handleWebSocketMessage);
+    };
+  }, [connectionId, queryClient, toast]);
+  
+  // Adicionando um efeito separado para monitorar o estado de conexão e chamar o callback quando conectado
+  useEffect(() => {
+    if (connectionStatus === "connected" && onConnected) {
+      console.log("QRCodeScanner detectou conexão e vai chamar onConnected após delay");
+      // Usar um delay para mostrar a mensagem de sucesso antes de fechar o modal
+      const timer = setTimeout(() => {
+        console.log("QRCodeScanner executando callback onConnected");
+        onConnected();
+      }, 1000);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [connectionStatus, onConnected]);
+  
+  // Adicionar um efeito para verificar conexões existentes
+  useEffect(() => {
+    // Se temos um connectionId, vamos verificar se já está conectado
+    if (connectionId) {
+      fetch(`/api/whatsapp/connections`)
+        .then(res => res.json())
+        .then(connections => {
+          console.log("Verificando status da conexão:", connections);
+          const ourConnection = connections.find((conn: any) => conn.id === connectionId);
+          if (ourConnection && ourConnection.status === 'connected') {
+            console.log("Conexão já está ativa, atualizando estado:", ourConnection);
+            setConnectionStatus('connected');
+          }
+        })
+        .catch(err => {
+          console.error("Erro verificando status das conexões:", err);
+        });
+    }
+  }, [connectionId]);
+
+  // Countdown timer
+  useEffect(() => {
+    if (!qrCodeUrl || timeLeft <= 0 || connectionStatus === "connected") return;
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => Math.max(0, prev - 1));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [qrCodeUrl, timeLeft, connectionStatus]);
+
+  // Format time left as MM:SS
+  const formatTimeLeft = () => {
+    const minutes = Math.floor(timeLeft / 60);
+    const seconds = timeLeft % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  const handleStartSession = () => {
+    if (!phoneNumber || !name) {
+      toast({
+        title: "Campos obrigatórios",
+        description: "Por favor, preencha o número e o nome para a conexão.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    startSessionMutation.mutate({ phoneNumber, name });
+  };
+
+  const handleGenerateNewQR = () => {
+    refetchQrCode();
+    // Reiniciar o timer
+    setTimeLeft(180);
+    toast({
+      title: "Gerando novo QR Code",
+      description: "O código QR está sendo atualizado...",
+    });
+  };
+
+  // Função para copiar número para área de transferência
+  const copyPhoneNumber = () => {
+    navigator.clipboard.writeText(phoneNumber);
+    toast({
+      title: "Número copiado",
+      description: "O número foi copiado para a área de transferência.",
+    });
+  };
+
+  return (
+    <Card className="w-full max-w-3xl mx-auto shadow-lg border-border/50">
+      <CardHeader className={cn(
+        "pb-4",
+        connectionStatus === "connected" && "bg-gradient-to-r from-primary/10 to-primary/5"
+      )}>
+        <div className="flex items-center gap-2 text-primary mb-1">
+          <MessageSquare className="h-5 w-5" />
+          <span className="text-sm font-medium uppercase tracking-wide">WhatsFlow</span>
+        </div>
+        <CardTitle className="flex items-center gap-2 text-2xl">
+          <span>
+            {!connectionId 
+              ? "Conectar Novo Número" 
+              : connectionStatus === "connected" 
+                ? "WhatsApp Conectado"
+                : "Escaneie o QR Code"}
+          </span>
+        </CardTitle>
+        <CardDescription>
+          {!connectionId 
+            ? "Conecte seu WhatsApp ao sistema para iniciar a comunicação automatizada" 
+            : connectionStatus === "connected" 
+              ? "Seu número foi conectado com sucesso ao sistema WhatsFlow"
+              : "Siga as instruções abaixo para conectar seu WhatsApp"}
+        </CardDescription>
+        
+        {connectionId && connectionStatus !== "connected" && timeLeft > 0 && (
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
+              <span>Tempo restante</span>
+              <span className="font-medium">{formatTimeLeft()}</span>
+            </div>
+            <Progress value={timeLeftPercentage} className="h-1" />
+          </div>
+        )}
+      </CardHeader>
+      
+      <CardContent className={cn(
+        "px-6 pt-4",
+        connectionStatus === "connected" && "px-8 pt-6"
+      )}>
+        {!connectionId ? (
+          <div className="space-y-6">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="phone-number" className="text-base">Número de WhatsApp</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="phone-number"
+                    placeholder="+55 11 98765-4321"
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    className="flex-1"
+                  />
+                  
+                  <Button 
+                    variant="outline" 
+                    size="icon"
+                    onClick={copyPhoneNumber}
+                    className="shrink-0"
+                    type="button"
+                    disabled={!phoneNumber}
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Digite o número no formato internacional incluindo o código do país.
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="connection-name" className="text-base">Nome da Conexão</Label>
+                <Input
+                  id="connection-name"
+                  placeholder="Ex: Atendimento Principal"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <p className="text-sm text-muted-foreground">
+                  Um nome descritivo para identificar esta conexão no painel.
+                </p>
+              </div>
+            </div>
+            
+            <Alert variant="default" className="bg-primary/5 border-primary/20">
+              <Info className="h-4 w-4 text-primary" />
+              <AlertDescription className="text-sm text-muted-foreground">
+                Esta conexão permitirá enviar e receber mensagens automaticamente através do seu WhatsApp. 
+                Uma única conexão pode ser usada em múltiplas automações.
+              </AlertDescription>
+            </Alert>
+          </div>
+        ) : connectionStatus === "connected" ? (
+          <div className="text-center py-8 space-y-5">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-primary/10 text-primary mb-4">
+              <CheckCircle2 className="h-10 w-10" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xl font-medium">WhatsApp Conectado!</h3>
+              <p className="text-muted-foreground max-w-md mx-auto">
+                Seu número <span className="font-medium">{phoneNumber}</span> foi conectado com sucesso e já está pronto para enviar e receber mensagens.
+              </p>
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-1 text-primary/70">
+              <div className="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full"></div>
+              <span className="text-sm">Redirecionando para o painel...</span>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center py-3">
+            <div className="w-full">
+              {qrCodeData?.qrCodeData ? (
+                <Tabs 
+                  defaultValue={activeTab} 
+                  onValueChange={setActiveTab}
+                  className="w-full"
+                >
+                  <div className="flex justify-center mb-4">
+                    <TabsList>
+                      <TabsTrigger value="standard" className="flex items-center gap-1.5">
+                        <QrCode className="h-3.5 w-3.5" />
+                        <span>QR Padrão</span>
+                      </TabsTrigger>
+                      <TabsTrigger value="whatsapp" className="flex items-center gap-1.5">
+                        <Smartphone className="h-3.5 w-3.5" />
+                        <span>QR WhatsApp</span>
+                      </TabsTrigger>
+                    </TabsList>
+                  </div>
+                  
+                  <TabsContent value="standard" className="mt-0">
+                    <div className="flex flex-col items-center">
+                      <div className={cn(
+                        "p-4 border-2 border-primary/20 rounded-xl bg-white transition-opacity",
+                        isRefetching && "opacity-60"
+                      )}>
+                        {isRefetching ? (
+                          <div className="w-64 h-64 flex items-center justify-center">
+                            <Loader2 className="h-10 w-10 animate-spin text-primary/50" />
+                          </div>
+                        ) : (
+                          <img
+                            src={qrCodeData.qrCodeData.standard}
+                            alt="QR Code padrão para conexão do WhatsApp"
+                            className="w-64 h-64"
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </TabsContent>
+                  
+                  <TabsContent value="whatsapp" className="mt-0">
+                    <div className="flex flex-col items-center">
+                      <div className={cn(
+                        "p-4 border-2 border-primary/20 rounded-xl bg-white transition-opacity",
+                        isRefetching && "opacity-60"
+                      )}>
+                        {isRefetching ? (
+                          <div className="w-64 h-64 flex items-center justify-center">
+                            <Loader2 className="h-10 w-10 animate-spin text-primary/50" />
+                          </div>
+                        ) : (
+                          <img
+                            src={qrCodeData.qrCodeData.whatsapp}
+                            alt="QR Code específico do WhatsApp"
+                            className="w-64 h-64"
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+              ) : qrCodeUrl ? (
+                <div className="flex flex-col items-center">
+                  <div className={cn(
+                    "p-4 border-2 border-primary/20 rounded-xl bg-white transition-opacity",
+                    isRefetching && "opacity-60"
+                  )}>
+                    {isRefetching ? (
+                      <div className="w-64 h-64 flex items-center justify-center">
+                        <Loader2 className="h-10 w-10 animate-spin text-primary/50" />
+                      </div>
+                    ) : (
+                      <img
+                        src={qrCodeUrl}
+                        alt="QR Code para conexão do WhatsApp"
+                        className="w-64 h-64"
+                      />
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center">
+                  <div className="p-4 border-2 border-primary/20 rounded-xl bg-white w-72 h-72 flex items-center justify-center">
+                    <Loader2 className="h-10 w-10 animate-spin text-primary/50" />
+                  </div>
+                </div>
+              )}
+              
+              <div className="mt-6 space-y-4">
+                <div className="bg-accent/15 p-4 rounded-lg border border-border max-w-md mx-auto">
+                  <h4 className="font-medium flex items-center gap-1.5 mb-3">
+                    <Smartphone className="h-4 w-4 text-primary" />
+                    <span>Instruções de Conexão:</span>
+                  </h4>
+                  
+                  <ol className="space-y-2 text-sm pl-5 list-decimal">
+                    <li>Abra o WhatsApp no seu celular</li>
+                    <li>Toque em <span className="font-medium">Menu</span> ou <span className="font-medium">Configurações</span></li>
+                    <li>Selecione <span className="font-medium">Aparelhos Conectados</span></li>
+                    <li>Toque em <span className="font-medium">Conectar um Dispositivo</span></li>
+                    <li>Aponte a câmera para o QR Code</li>
+                  </ol>
+                  
+                  {timeLeft < 60 && (
+                    <div className="mt-3 flex items-center gap-1.5 text-xs text-amber-600">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      <span>O QR Code expirará em breve. Se expirar, clique em "Gerar Novo QR Code".</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+      
+      <CardFooter className={cn(
+        "px-6 pt-2 pb-6 flex flex-wrap gap-3",
+        !connectionId || connectionStatus === "connected" ? "justify-center" : "justify-between" 
+      )}>
+        {!connectionId ? (
+          <Button 
+            size="lg"
+            onClick={handleStartSession}
+            className="w-full max-w-xs"
+            disabled={startSessionMutation.isPending}
+          >
+            {startSessionMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <span>Iniciando sessão...</span>
+              </>
+            ) : (
+              <span>Iniciar Conexão</span>
+            )}
+          </Button>
+        ) : connectionStatus === "connected" ? (
+          <Button 
+            variant="outline" 
+            onClick={onConnected} 
+            className="mt-2"
+          >
+            Continuar para o Painel
+          </Button>
+        ) : (
+          <>
+            <Button 
+              variant={timeLeft < 30 ? "default" : "outline"}
+              className={cn(
+                "gap-1.5",
+                timeLeft < 30 && "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 hover:text-amber-800"
+              )}
+              onClick={handleGenerateNewQR}
+              disabled={isRefetching}
+            >
+              <RefreshCw className={cn(
+                "h-4 w-4", 
+                isRefetching && "animate-spin"
+              )} />
+              <span>{isRefetching ? "Gerando..." : "Gerar Novo QR Code"}</span>
+            </Button>
+            
+            <Button variant="outline" className="gap-1.5">
+              <HelpCircle className="h-4 w-4" />
+              <span>Ajuda</span>
+            </Button>
+          </>
+        )}
+      </CardFooter>
+    </Card>
+  );
+}

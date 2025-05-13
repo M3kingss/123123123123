@@ -1,0 +1,55 @@
+4. Registro de Rotas e Inicialização do WebSocket - server/routes.ts
+
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { WebSocketServer } from './websocket';
+import { whatsappManager } from './services/whatsapp';
+import { authMiddleware } from './middleware/auth';
+
+// Controllers
+import * as authController from './controllers/auth.controller';
+import * as whatsappController from './controllers/whatsapp.controller';
+import * as automationController from './controllers/automation.controller';
+import * as dashboardController from './controllers/dashboard.controller';
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Create HTTP server
+  const httpServer = createServer(app);
+  
+  // Initialize WebSocket server
+  const wss = new WebSocketServer(httpServer);
+  
+  // Initialize WhatsApp connections
+  await whatsappManager.initializeActiveConnections();
+
+  // Auth Routes
+  app.post('/api/auth/login', authController.login);
+  app.post('/api/auth/register', authController.register);
+  app.post('/api/auth/logout', authController.logout);
+  app.get('/api/auth/me', authMiddleware, authController.getCurrentUser);
+
+  // WhatsApp Connection Routes
+  app.post('/api/whatsapp/start-session', authMiddleware, whatsappController.startSession);
+  app.get('/api/whatsapp/qrcode/:connectionId', authMiddleware, whatsappController.getQRCode);
+  app.get('/api/whatsapp/connections', authMiddleware, whatsappController.getConnections);
+  app.post('/api/whatsapp/disconnect/:connectionId', authMiddleware, whatsappController.disconnectSession);
+
+  // Automation Routes
+  app.get('/api/automations', authMiddleware, automationController.getAutomations);
+  app.get('/api/automations/:id', authMiddleware, automationController.getAutomation);
+  app.post('/api/automations', authMiddleware, automationController.createAutomation);
+  app.put('/api/automations/:id', authMiddleware, automationController.updateAutomation);
+  app.delete('/api/automations/:id', authMiddleware, automationController.deleteAutomation);
+  app.patch('/api/automations/:id/toggle', authMiddleware, automationController.toggleAutomation);
+
+  // Dashboard Routes
+  app.get('/api/dashboard/stats', authMiddleware, dashboardController.getStats);
+  app.get('/api/dashboard/activity', authMiddleware, dashboardController.getRecentActivity);
+
+  // Contacts and Conversations Routes
+  app.get('/api/contacts', authMiddleware, dashboardController.getContacts);
+  app.get('/api/conversations', authMiddleware, dashboardController.getConversations);
+
+  return httpServer;
+}

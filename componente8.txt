@@ -1,0 +1,255 @@
+8. Componente de Cartão de Conexão WhatsApp - client/src/components/dashboard/ConnectionCard.tsx
+
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { disconnectWhatsapp } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
+import { ExternalLink, MessageSquare, Phone, Settings, BarChart3, X, Signal, SignalLow, SignalZero } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { useState, useEffect } from "react";
+import websocketClient from "@/lib/websocket";
+import { Link } from "wouter";
+import { cn } from "@/lib/utils";
+
+export interface ConnectionCardProps {
+  connection: {
+    id: number;
+    name: string;
+    phoneNumber: string;
+    status: string;
+    stats?: {
+      contacts?: number;
+      conversations?: number;
+      flows?: number;
+      automations?: number;
+    };
+  };
+  onDisconnect?: () => void;
+}
+
+export default function ConnectionCard({
+  connection,
+  onDisconnect
+}: ConnectionCardProps) {
+  const { id, name, phoneNumber, status: initialStatus, stats = {
+    contacts: 0,
+    conversations: 0,
+    flows: 0,
+    automations: 0,
+  } } = connection;
+  const [status, setStatus] = useState(initialStatus);
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  
+  // Atualizar status local quando o status original mudar
+  useEffect(() => {
+    setStatus(initialStatus);
+  }, [initialStatus]);
+  
+  // Escutar atualizações de status via WebSocket
+  useEffect(() => {
+    const handleStatusUpdate = (data: any) => {
+      if (data.type === 'whatsapp_status' && data.connectionId === id) {
+        console.log(`ConnectionCard ${id} recebendo atualização WebSocket: ${data.status}`);
+        setStatus(data.status);
+        
+        // Forçar atualização dos dados da conexão
+        queryClient.invalidateQueries({ queryKey: ['/api/whatsapp/connections'] });
+      }
+    };
+    
+    websocketClient.addMessageListener(handleStatusUpdate);
+    
+    return () => {
+      websocketClient.removeMessageListener(handleStatusUpdate);
+    };
+  }, [id, queryClient]);
+
+  const disconnectMutation = useMutation({
+    mutationFn: (connectionId: number) => disconnectWhatsapp(connectionId),
+    onSuccess: () => {
+      toast({
+        title: "WhatsApp desconectado",
+        description: `O número ${phoneNumber} foi desconectado com sucesso.`,
+      });
+      // Atualizando a lista de conexões
+      queryClient.invalidateQueries({ queryKey: ['/api/whatsapp/connections'] });
+      console.log("Conexão desconectada com sucesso, invalidando queries");
+    },
+    onError: (error) => {
+      console.error("Erro ao desconectar WhatsApp:", error);
+      toast({
+        title: "Erro ao desconectar",
+        description: `Ocorreu um erro ao desconectar o WhatsApp: ${error}`,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleDisconnect = () => {
+    console.log("Desconectando conexão ID:", id);
+    disconnectMutation.mutate(id);
+    setConfirmOpen(false);
+    
+    // Chamar o callback de desconexão passado pelo componente pai, se existir
+    if (onDisconnect) {
+      onDisconnect();
+    }
+  };
+
+  // Fornecer ícone apropriado com base no status
+  const getStatusIcon = () => {
+    switch (status) {
+      case "connected":
+        return <Signal className="h-4 w-4 text-primary" />;
+      case "connecting":
+        return <SignalLow className="h-4 w-4 text-amber-500" />;
+      default:
+        return <SignalZero className="h-4 w-4 text-muted-foreground" />;
+    }
+  };
+
+  // Obter a cor do status para o gradiente
+  const getStatusColorClass = () => {
+    switch (status) {
+      case "connected":
+        return "from-primary/20 to-primary/10";
+      case "connecting":
+        return "from-amber-500/20 to-amber-500/10";
+      default:
+        return "from-muted/20 to-muted/10";
+    }
+  };
+
+  return (
+    <Card className="h-full overflow-hidden">
+      <CardHeader className={cn(
+        "p-4 bg-gradient-to-br border-b",
+        getStatusColorClass()
+      )}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className={cn(
+              "w-10 h-10 rounded-full flex items-center justify-center",
+              status === "connected" ? "bg-primary/20" : "bg-muted/20"
+            )}>
+              <Phone className={cn(
+                "h-5 w-5",
+                status === "connected" ? "text-primary" : "text-muted-foreground"
+              )} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="font-medium">{phoneNumber}</p>
+                <Badge variant="outline" className="ml-1 px-1.5 text-xs font-normal flex items-center gap-1">
+                  {getStatusIcon()}
+                  <span>
+                    {status === "connected" 
+                      ? "Online" 
+                      : status === "connecting" 
+                        ? "Conectando" 
+                        : "Offline"}
+                  </span>
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">{name}</p>
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      
+      <CardContent className="p-4 pt-5">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-accent/30 p-3 rounded-lg space-y-1 text-center">
+            <p className="text-xs text-muted-foreground">Contatos</p>
+            <p className="font-semibold text-lg">{stats.contacts || 0}</p>
+          </div>
+          <div className="bg-accent/30 p-3 rounded-lg space-y-1 text-center">
+            <p className="text-xs text-muted-foreground">Conversas</p>
+            <p className="font-semibold text-lg">{stats.conversations || 0}</p>
+          </div>
+          <div className="bg-accent/30 p-3 rounded-lg space-y-1 text-center">
+            <p className="text-xs text-muted-foreground">Fluxos</p>
+            <p className="font-semibold text-lg">{stats.flows || 0}</p>
+          </div>
+          <div className="bg-accent/30 p-3 rounded-lg space-y-1 text-center">
+            <p className="text-xs text-muted-foreground">Automações</p>
+            <p className="font-semibold text-lg">{stats.automations || 0}</p>
+          </div>
+        </div>
+      </CardContent>
+      
+      <CardFooter className="p-4 pt-0 flex flex-wrap gap-2 justify-between">
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" className="text-xs h-8" asChild>
+            <Link href={`/connections/${id}/manage`}>
+              <Settings className="h-3.5 w-3.5 mr-1" />
+              <span>Gerenciar</span>
+            </Link>
+          </Button>
+          <Button size="sm" variant="outline" className="text-xs h-8" asChild>
+            <Link href={`/connections/${id}/stats`}>
+              <BarChart3 className="h-3.5 w-3.5 mr-1" />
+              <span>Estatísticas</span>
+            </Link>
+          </Button>
+        </div>
+        
+        <div>
+          {disconnectMutation.isPending ? (
+            <Button 
+              size="sm" 
+              variant="destructive" 
+              className="text-xs h-8"
+              disabled
+            >
+              <span className="animate-spin mr-1">◌</span>
+              <span>Desconectando</span>
+            </Button>
+          ) : (
+            <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+              <AlertDialogTrigger asChild>
+                <Button 
+                  size="sm" 
+                  variant="destructive" 
+                  className="text-xs h-8"
+                >
+                  <X className="h-3.5 w-3.5 mr-1" />
+                  <span>Desconectar</span>
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Desconectar WhatsApp</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Tem certeza que deseja desconectar o WhatsApp {phoneNumber}? Você precisará escanear o QR Code novamente para reconectar.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleDisconnect}>
+                    Desconectar
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+        </div>
+      </CardFooter>
+    </Card>
+  );
+}

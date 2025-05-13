@@ -1,0 +1,141 @@
+13. Cliente WebSocket - client/src/lib/websocket.ts
+
+type MessageListener = (message: any) => void;
+type ConnectionListener = () => void;
+
+class WebSocketClient {
+  private socket: WebSocket | null = null;
+  private messageListeners: MessageListener[] = [];
+  private connectionListeners: ConnectionListener[] = [];
+  private reconnectTimeout: number | null = null;
+  private isConnected = false;
+
+  constructor() {
+    this.connect();
+  }
+
+  private connect() {
+    // Use relative path for WebSocket URL to ensure it works in all environments
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    console.log(`Attempting to connect to WebSocket at ${wsUrl}`);
+    
+    try {
+      this.socket = new WebSocket(wsUrl);
+
+      this.socket.addEventListener('open', () => {
+        this.isConnected = true;
+        console.log('WebSocket connected successfully');
+        
+        // Notify all connection listeners
+        if (this.connectionListeners.length > 0) {
+          console.log(`Notifying ${this.connectionListeners.length} connection listeners`);
+          this.connectionListeners.forEach(listener => {
+            try {
+              listener();
+            } catch (error) {
+              console.error('Error in WebSocket connection listener:', error);
+            }
+          });
+        } else {
+          console.log('No connection listeners registered');
+        }
+      });
+
+      this.socket.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log("WebSocket received message:", data);
+          
+          // Destaque especial para eventos relacionados ao WhatsApp
+          if (data.type === 'whatsapp_status') {
+            console.log(`%c WhatsApp Status Changed: ${data.status} for connection ${data.connectionId} `, 
+              'background: #4caf50; color: white; padding: 3px; border-radius: 3px;');
+          }
+          
+          if (this.messageListeners.length > 0) {
+            console.log(`Notifying ${this.messageListeners.length} message listeners about: ${data.type}`);
+            this.messageListeners.forEach(listener => {
+              try {
+                listener(data);
+              } catch (listenerError) {
+                console.error('Error in WebSocket message listener:', listenerError);
+              }
+            });
+          } else {
+            console.log('No message listeners registered to handle this event');
+          }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      });
+
+      this.socket.addEventListener('close', () => {
+        this.isConnected = false;
+        console.log('WebSocket disconnected, trying to reconnect...');
+        
+        // Clean up the previous reconnect timeout if it exists
+        if (this.reconnectTimeout) {
+          window.clearTimeout(this.reconnectTimeout);
+        }
+        
+        // Reconnect after 3 seconds
+        this.reconnectTimeout = window.setTimeout(() => {
+          this.connect();
+        }, 3000);
+      });
+
+      this.socket.addEventListener('error', (error) => {
+        console.error('WebSocket error:', error);
+      });
+    } catch (error) {
+      console.error('Error initializing WebSocket connection:', error);
+    }
+  }
+
+  public addMessageListener(listener: MessageListener) {
+    this.messageListeners.push(listener);
+  }
+
+  public removeMessageListener(listener: MessageListener) {
+    this.messageListeners = this.messageListeners.filter(l => l !== listener);
+  }
+
+  public addConnectionListener(listener: ConnectionListener) {
+    this.connectionListeners.push(listener);
+    
+    // If already connected, call the listener immediately
+    if (this.isConnected) {
+      listener();
+    }
+  }
+
+  public removeConnectionListener(listener: ConnectionListener) {
+    this.connectionListeners = this.connectionListeners.filter(l => l !== listener);
+  }
+
+  public sendMessage(data: any) {
+    if (this.socket && this.isConnected) {
+      this.socket.send(JSON.stringify(data));
+    } else {
+      console.warn('WebSocket not connected, message not sent');
+    }
+  }
+
+  public close() {
+    if (this.socket) {
+      this.socket.close();
+    }
+    
+    if (this.reconnectTimeout) {
+      window.clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+  }
+}
+
+// Create a singleton instance
+export const websocketClient = new WebSocketClient();
+
+export default websocketClient;

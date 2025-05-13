@@ -1,0 +1,438 @@
+11. Serviço de WhatsApp no Servidor - server/services/whatsapp.ts
+
+import whatsappWeb from 'whatsapp-web.js';
+import { Client, MessageMedia } from 'whatsapp-web.js';
+// Access LocalAuth via default import
+const LocalAuth = whatsappWeb.LocalAuth;
+import { EventEmitter } from 'events';
+import path from 'path';
+import fs from 'fs';
+import { WhatsappConnection } from '@shared/schema';
+import { storage } from '../storage';
+
+// Export event emitter for external components to listen to events
+export const whatsappEvents = new EventEmitter();
+
+// Class to manage WhatsApp connections
+export class WhatsAppManager {
+  private clients = new Map<number, any>();
+  private qrCodes = new Map<number, string>();
+  private readonly storagePath: string;
+
+  constructor() {
+    this.storagePath = path.join(process.cwd(), '.wwebjs_auth');
+    this.ensureStoragePathExists();
+  }
+
+  private ensureStoragePathExists() {
+    if (!fs.existsSync(this.storagePath)) {
+      fs.mkdirSync(this.storagePath, { recursive: true });
+    }
+  }
+
+  async startSession(connectionId: number, companyId: number): Promise<void> {
+    // Check if client already exists
+    if (this.clients.has(connectionId)) {
+      return;
+    }
+
+    // Initialize client with LocalAuth
+    const sessionDir = path.join(this.storagePath, `company_${companyId}_connection_${connectionId}`);
+    
+    // Ensure directory exists
+    if (!fs.existsSync(sessionDir)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    }
+    
+    // Create a WhatsApp client with puppeteer configuration
+    const client = new Client({
+      authStrategy: new LocalAuth({ 
+        clientId: `conn_${connectionId}`, 
+        dataPath: sessionDir 
+      }),
+      puppeteer: { 
+        headless: true,
+        executablePath: '/nix/store/zi4f80l169xlmivz8vja8wlphq74qqk0-chromium-125.0.6422.141/bin/chromium',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-extensions',
+          '--no-first-run',
+          '--disable-gpu'
+        ]
+      },
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2401.10.html',
+      }
+    });
+
+    // Set up event listeners
+    client.on('qr', (qr) => {
+      console.log(`QR Code generated for connection ${connectionId}`);
+      
+      try {
+        // Create two QR code formats to maximize compatibility
+        // 1. Standard QR code with the raw WhatsApp data
+        const standardQrUrl = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}&size=256x256&margin=4`;
+        
+        // 2. WhatsApp-specific QR code format
+        const whatsappProtocolQrUrl = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(`whatsapp://qr/${encodeURIComponent(qr)}`)}&size=256x256&margin=4`;
+        
+        // We'll store a JSON object with both QR code variants
+        const qrCodeData = {
+          standard: standardQrUrl,
+          whatsapp: whatsappProtocolQrUrl,
+          raw: qr
+        };
+        
+        // Store the standard QR as the default for backwards compatibility
+        this.qrCodes.set(connectionId, standardQrUrl);
+        
+        // Emit event with all QR code formats
+        whatsappEvents.emit('qrcode', { 
+          connectionId, 
+          qrCode: standardQrUrl,
+          qrCodeData
+        });
+        
+        console.log(`QR Code URLs generated for connection ${connectionId}`);
+      } catch (qrError) {
+        console.error(`Error generating QR code URL for connection ${connectionId}:`, qrError);
+        // Store raw QR code as fallback
+        this.qrCodes.set(connectionId, qr);
+        whatsappEvents.emit('qrcode', { connectionId, qrCode: qr });
+      }
+    });
+
+    client.on('ready', async () => {
+      console.log(`Client is ready for connection ${connectionId}`);
+      
+      try {
+        // Get client info
+        const info = await client.getState();
+        console.log(`Connection ${connectionId} state: ${info}`);
+        
+        // Update connection status in database
+        await storage.updateWhatsappConnectionStatus(connectionId, 'connected');
+        
+        // Emit event for WebSocket with detailed info
+        // Send both formats to ensure compatibility with all clients
+        whatsappEvents.emit('status_change', { 
+          connectionId, 
+          status: 'connected',
+          info: {
+            state: info,
+            timestamp: new Date()
+          }
+        });
+        
+        // Also emit in the format expected by the frontend
+        // Vamos buscar o companyId para incluir na mensagem
+        const connection = await storage.getWhatsappConnection(connectionId);
+        if (connection) {
+          console.log(`Emitting whatsapp_status event for connection ${connectionId} with companyId ${connection.companyId}`);
+          whatsappEvents.emit('whatsapp_status', { 
+            type: 'whatsapp_status',
+            connectionId, 
+            companyId: connection.companyId,
+            status: 'connected'
+          });
+        } else {
+          console.log(`Connection ${connectionId} not found, emitting without companyId`);
+          whatsappEvents.emit('whatsapp_status', { 
+            type: 'whatsapp_status',
+            connectionId, 
+            status: 'connected'
+          });
+        }
+        
+        // Clear QR code since we're now connected
+        this.qrCodes.delete(connectionId);
+      } catch (err) {
+        console.error(`Error processing ready event for connection ${connectionId}:`, err);
+        // Still mark as connected even if we can't get additional info
+        await storage.updateWhatsappConnectionStatus(connectionId, 'connected');
+        whatsappEvents.emit('status_change', { connectionId, status: 'connected' });
+        this.qrCodes.delete(connectionId);
+      }
+    });
+
+    client.on('authenticated', () => {
+      console.log(`Client is authenticated for connection ${connectionId}`);
+      // Update connection status in database
+      storage.updateWhatsappConnectionStatus(connectionId, 'authenticated');
+    });
+
+    client.on('auth_failure', async (msg) => {
+      console.error(`Authentication failure for connection ${connectionId}:`, msg);
+      // Update connection status in database
+      await storage.updateWhatsappConnectionStatus(connectionId, 'disconnected');
+      whatsappEvents.emit('status_change', { connectionId, status: 'disconnected' });
+    });
+
+    client.on('disconnected', async (reason) => {
+      console.log(`Client disconnected for connection ${connectionId}:`, reason);
+      // Update connection status in database
+      await storage.updateWhatsappConnectionStatus(connectionId, 'disconnected');
+      whatsappEvents.emit('status_change', { connectionId, status: 'disconnected' });
+      
+      // Remove client from map
+      this.clients.delete(connectionId);
+    });
+
+    // Setup message handler
+    client.on('message', async (msg) => {
+      try {
+        console.log(`Message received for connection ${connectionId}:`, msg.body);
+        
+        // Store message in database and process it
+        const contact = await msg.getContact();
+        
+        // Create or update contact
+        const contactData = {
+          companyId,
+          connectionId,
+          name: contact.name || contact.pushname || 'Unknown',
+          phoneNumber: contact.number,
+        };
+        
+        const contactId = await storage.createOrUpdateContact(contactData);
+        
+        // Get or create conversation
+        const conversationId = await storage.createOrGetConversation({
+          companyId,
+          connectionId,
+          contactId
+        });
+        
+        // Store message
+        await storage.createMessage({
+          conversationId,
+          contactId,
+          connectionId,
+          companyId,
+          content: msg.body,
+          type: 'text',
+          direction: 'incoming'
+        });
+        
+        // Emit message event for WebSocket
+        whatsappEvents.emit('message', {
+          connectionId,
+          conversationId,
+          contactId,
+          companyId,
+          message: msg.body,
+          from: contactData.phoneNumber,
+          timestamp: new Date()
+        });
+        
+        // Get automations for this company
+        const automations = await storage.getActiveAutomationsForCompany(companyId);
+        
+        // Check for triggers in automations
+        for (const automation of automations) {
+          let shouldTrigger = false;
+          
+          // Check if this automation applies to this connection
+          if (
+            !automation.connectionIds || 
+            automation.connectionIds === null ||
+            (typeof automation.connectionIds === 'string' && automation.connectionIds === 'all') || 
+            (Array.isArray(automation.connectionIds) && automation.connectionIds.includes(connectionId))
+          ) {
+            // Check trigger type
+            if (automation.trigger === 'all') {
+              shouldTrigger = true;
+            } else if (automation.trigger === 'keywords' && automation.keywords && automation.keywords.length > 0) {
+              const message = msg.body.toLowerCase();
+              for (const keyword of automation.keywords) {
+                if (message.includes(keyword.toLowerCase())) {
+                  shouldTrigger = true;
+                  break;
+                }
+              }
+            }
+          }
+          
+          // If triggered, send response
+          if (shouldTrigger) {
+            // Process template variables
+            let responseMessage = automation.responseMessage.replace('{{nome}}', contactData.name);
+            
+            // Wait a moment to seem more natural and avoid spam detection
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Send the message
+            await this.sendMessage(connectionId, contact.number, responseMessage);
+            
+            // Store outgoing message
+            await storage.createMessage({
+              conversationId,
+              contactId,
+              connectionId,
+              companyId,
+              content: responseMessage,
+              type: 'text',
+              direction: 'outgoing'
+            });
+            
+            // Execute additional actions if defined
+            if (automation.actions) {
+              try {
+                const actions = typeof automation.actions === 'string' 
+                  ? JSON.parse(automation.actions) 
+                  : automation.actions;
+                
+                // For example, notify team if configured
+                if (actions && actions.notifyTeam) {
+                  whatsappEvents.emit('team_notification', {
+                    connectionId,
+                    conversationId,
+                    contactId,
+                    companyId,
+                    message: `New message from ${contactData.name} (${contactData.phoneNumber}): ${msg.body}`
+                  });
+                }
+                
+                // Send webhook if configured
+                if (actions && actions.useWebhook) {
+                  // Webhook implementation would go here
+                  console.log('Webhook would be triggered here');
+                }
+              } catch (actionError) {
+                console.error('Error processing automation actions:', actionError);
+              }
+            }
+            
+            // Break after first matching automation
+            // In a more sophisticated system, you might want to handle multiple automations
+            break;
+          }
+        }
+      } catch (error) {
+        console.error(`Error processing message for connection ${connectionId}:`, error);
+      }
+    });
+
+    // Initialize client
+    await client.initialize();
+    this.clients.set(connectionId, client);
+  }
+
+  async getQrCode(connectionId: number): Promise<string | null> {
+    const qrCode = this.qrCodes.get(connectionId) || null;
+    console.log(`Retrieving QR code for connection ${connectionId}:`, qrCode ? qrCode.substring(0, 20) + '...' : 'null');
+    return qrCode;
+  }
+
+  async sendMessage(connectionId: number, to: string, message: string): Promise<void> {
+    const client = this.clients.get(connectionId);
+    if (!client) {
+      throw new Error(`No active client for connection ${connectionId}`);
+    }
+
+    // Ensure number format is correct (add @ if missing)
+    const formattedNumber = to.includes('@c.us') ? to : `${to}@c.us`;
+    await client.sendMessage(formattedNumber, message);
+  }
+
+  async disconnectSession(connectionId: number): Promise<void> {
+    console.log(`Disconnecting WhatsApp session for connection ${connectionId}`);
+    
+    // Buscar a conexão para obter o companyId
+    const connection = await storage.getWhatsappConnection(connectionId);
+    const companyId = connection?.companyId;
+    
+    console.log(`Found connection ${connectionId} with companyId ${companyId}`);
+    
+    const client = this.clients.get(connectionId);
+    if (client) {
+      try {
+        // Attempt graceful logout
+        await client.logout();
+      } catch (error) {
+        console.error(`Error logging out connection ${connectionId}:`, error);
+      } finally {
+        // Destroy client instance
+        await client.destroy();
+        this.clients.delete(connectionId);
+        this.qrCodes.delete(connectionId);
+        
+        // Update status in database
+        await storage.updateWhatsappConnectionStatus(connectionId, 'disconnected');
+        
+        // Emit legacy event
+        whatsappEvents.emit('status_change', { connectionId, status: 'disconnected' });
+        
+        // Emit with companyId if available
+        if (companyId) {
+          console.log(`Emitting whatsapp_status event for connection ${connectionId} with companyId ${companyId}`);
+          whatsappEvents.emit('whatsapp_status', { 
+            type: 'whatsapp_status',
+            connectionId, 
+            companyId,
+            status: 'disconnected'
+          });
+        } else {
+          console.log(`No companyId found for connection ${connectionId}, emitting without it`);
+          whatsappEvents.emit('whatsapp_status', { 
+            type: 'whatsapp_status',
+            connectionId, 
+            status: 'disconnected'
+          });
+        }
+      }
+    } else {
+      console.log(`No active client found for connection ${connectionId}, updating status directly`);
+      
+      // Update connection status in database anyway
+      await storage.updateWhatsappConnectionStatus(connectionId, 'disconnected');
+      
+      // Emit legacy event
+      whatsappEvents.emit('status_change', { connectionId, status: 'disconnected' });
+      
+      // Emit with companyId if available
+      if (companyId) {
+        console.log(`Emitting whatsapp_status event for connection ${connectionId} with companyId ${companyId}`);
+        whatsappEvents.emit('whatsapp_status', { 
+          type: 'whatsapp_status',
+          connectionId, 
+          companyId,
+          status: 'disconnected'
+        });
+      } else {
+        console.log(`No companyId found for connection ${connectionId}, emitting without it`);
+        whatsappEvents.emit('whatsapp_status', { 
+          type: 'whatsapp_status',
+          connectionId, 
+          status: 'disconnected'
+        });
+      }
+    }
+  }
+
+  // Method to initialize all active connections on server start
+  async initializeActiveConnections(): Promise<void> {
+    try {
+      const connections = await storage.getActiveWhatsappConnections();
+      console.log(`Initializing ${connections.length} active WhatsApp connections`);
+      
+      for (const connection of connections) {
+        try {
+          await this.startSession(connection.id, connection.companyId);
+        } catch (error) {
+          console.error(`Failed to initialize connection ${connection.id}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error('Error initializing active connections:', error);
+    }
+  }
+}
+
+// Create and export a singleton instance
+export const whatsappManager = new WhatsAppManager();

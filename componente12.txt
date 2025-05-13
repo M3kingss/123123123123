@@ -1,0 +1,259 @@
+12. Servidor WebSocket - server/websocket.ts
+
+import { WebSocketServer as WSServer, WebSocket } from 'ws';
+import { Server } from 'http';
+import { whatsappEvents } from './services/whatsapp';
+import { storage } from './storage';
+import cookie from 'cookie';
+import { authService } from './services/auth';
+
+interface WSClient {
+  ws: any; // WebSocket instance
+  userId: number;
+  companyId: number;
+}
+
+export class WebSocketServer {
+  private wss: WSServer;
+  private clients: Map<any, WSClient> = new Map();
+  
+  constructor(server: Server) {
+    this.wss = new WSServer({ server });
+    this.initialize();
+    this.setupWhatsAppEventListeners();
+  }
+  
+  private initialize() {
+    this.wss.on('connection', async (ws: any, req: any) => {
+      try {
+        // Extract auth token from cookies
+        const cookieHeader = req.headers.cookie;
+        if (!cookieHeader) {
+          ws.close(4001, 'Unauthorized');
+          return;
+        }
+        
+        const cookies = cookie.parse(cookieHeader);
+        const token = cookies.authToken;
+        
+        if (!token) {
+          ws.close(4001, 'Unauthorized');
+          return;
+        }
+        
+        // Verify token and get user info
+        const decoded = authService.verifyToken(token);
+        
+        // Add client to tracked clients
+        this.clients.set(ws, {
+          ws,
+          userId: decoded.userId,
+          companyId: decoded.companyId
+        });
+        
+        console.log(`WebSocket client connected. User: ${decoded.userId}, Company: ${decoded.companyId}, Total clients: ${this.clients.size}`);
+        
+        // Log all current clients for debugging
+        this.logAllClients();
+        
+        // Handle client messages
+        ws.on('message', (message: any) => {
+          this.handleClientMessage(ws, message.toString());
+        });
+        
+        // Handle client disconnect
+        ws.on('close', () => {
+          const client = this.clients.get(ws);
+          console.log(`WebSocket client disconnected. User: ${client?.userId}, Company: ${client?.companyId}`);
+          this.clients.delete(ws);
+          console.log(`Clients after disconnect: ${this.clients.size}`);
+          this.logAllClients();
+        });
+        
+        // Send initial status
+        ws.send(JSON.stringify({ type: 'connection_status', status: 'connected' }));
+        
+      } catch (error) {
+        console.error('WebSocket auth error:', error);
+        ws.close(4001, 'Unauthorized');
+      }
+    });
+  }
+  
+  private handleClientMessage(ws: any, message: string) {
+    try {
+      const data = JSON.parse(message);
+      // Handle different message types
+      // For future expansion
+    } catch (error) {
+      console.error('Error parsing WebSocket message:', error);
+    }
+  }
+  
+  private setupWhatsAppEventListeners() {
+    // Listen for WhatsApp QR code events
+    whatsappEvents.on('qrcode', async (data) => {
+      try {
+        // Precisamos buscar o companyId da conexão para transmitir corretamente
+        const connection = await storage.getWhatsappConnection(data.connectionId);
+        if (connection) {
+          console.log(`Broadcasting QR code for connection ${data.connectionId} to company ${connection.companyId}`);
+          this.broadcastToCompany(connection.companyId, {
+            type: 'whatsapp_qrcode',
+            connectionId: data.connectionId,
+            qrCode: data.qrCode
+          });
+        } else {
+          console.error(`Could not find connection ${data.connectionId} for broadcasting QR code`);
+        }
+      } catch (error) {
+        console.error(`Error broadcasting QR code for connection ${data.connectionId}:`, error);
+      }
+    });
+    
+    // Listen for WhatsApp status change events
+    whatsappEvents.on('status_change', async (data) => {
+      try {
+        // Precisamos buscar o companyId da conexão para transmitir corretamente
+        const connection = await storage.getWhatsappConnection(data.connectionId);
+        if (connection) {
+          console.log(`Broadcasting status change for connection ${data.connectionId} to company ${connection.companyId}: ${data.status}`);
+          this.broadcastToCompany(connection.companyId, {
+            type: 'whatsapp_status',
+            connectionId: data.connectionId,
+            status: data.status
+          });
+        } else {
+          console.error(`Could not find connection ${data.connectionId} for broadcasting status change`);
+        }
+      } catch (error) {
+        console.error(`Error broadcasting status change for connection ${data.connectionId}:`, error);
+      }
+    });
+    
+    // Listen for direct whatsapp_status events (which may include companyId)
+    whatsappEvents.on('whatsapp_status', async (data) => {
+      try {
+        // Se o evento já inclui companyId, use-o diretamente
+        if (data.companyId) {
+          console.log(`Broadcasting whatsapp_status for connection ${data.connectionId} to company ${data.companyId}: ${data.status}`);
+          this.broadcastToCompany(data.companyId, {
+            type: 'whatsapp_status',
+            connectionId: data.connectionId,
+            status: data.status
+          });
+        } 
+        // Caso contrário, busque o companyId como no evento status_change
+        else {
+          const connection = await storage.getWhatsappConnection(data.connectionId);
+          if (connection) {
+            console.log(`Broadcasting whatsapp_status for connection ${data.connectionId} to company ${connection.companyId}: ${data.status}`);
+            this.broadcastToCompany(connection.companyId, {
+              type: 'whatsapp_status',
+              connectionId: data.connectionId,
+              status: data.status
+            });
+          } else {
+            console.error(`Could not find connection ${data.connectionId} for broadcasting whatsapp_status`);
+          }
+        }
+      } catch (error) {
+        console.error(`Error broadcasting whatsapp_status for connection ${data.connectionId}:`, error);
+      }
+    });
+    
+    // Listen for WhatsApp message events
+    whatsappEvents.on('message', async (data) => {
+      try {
+        // Se o evento já inclui companyId, use-o diretamente
+        if (data.companyId) {
+          console.log(`Broadcasting message for connection ${data.connectionId} to company ${data.companyId}`);
+          this.broadcastToCompany(data.companyId, {
+            type: 'whatsapp_message',
+            connectionId: data.connectionId,
+            conversationId: data.conversationId,
+            contactId: data.contactId,
+            message: data.message,
+            from: data.from,
+            timestamp: data.timestamp
+          });
+        }
+        // Caso contrário, busque o companyId
+        else {
+          const connection = await storage.getWhatsappConnection(data.connectionId);
+          if (connection) {
+            console.log(`Broadcasting message for connection ${data.connectionId} to company ${connection.companyId}`);
+            this.broadcastToCompany(connection.companyId, {
+              type: 'whatsapp_message',
+              connectionId: data.connectionId,
+              conversationId: data.conversationId,
+              contactId: data.contactId,
+              message: data.message,
+              from: data.from,
+              timestamp: data.timestamp
+            });
+          } else {
+            console.error(`Could not find connection ${data.connectionId} for broadcasting message`);
+          }
+        }
+      } catch (error) {
+        console.error(`Error broadcasting message for connection ${data.connectionId}:`, error);
+      }
+    });
+    
+    // Listen for team notification events
+    whatsappEvents.on('team_notification', (data) => {
+      this.broadcastToCompany(data.companyId, {
+        type: 'team_notification',
+        connectionId: data.connectionId,
+        conversationId: data.conversationId,
+        contactId: data.contactId,
+        message: data.message
+      });
+    });
+  }
+  
+  // Send a message to all clients of a specific company
+  private broadcastToCompany(companyId: number, message: any) {
+    // Debug: mostrar quantos clientes existem
+    console.log(`Broadcasting to company ${companyId}, total connected clients: ${this.clients.size}`);
+    
+    let clientCount = 0;
+    this.clients.forEach(client => {
+      console.log(`Checking client: userId=${client.userId}, companyId=${client.companyId}, matching=${client.companyId === companyId}`);
+      if (client.companyId === companyId) {
+        clientCount++;
+        try {
+          if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+            console.log(`Sending message to client userId=${client.userId} of company ${client.companyId}`);
+            client.ws.send(JSON.stringify(message));
+          } else {
+            console.log(`Client websocket not ready for userId=${client.userId}, readyState=${client.ws?.readyState}`);
+          }
+        } catch (error) {
+          console.error(`Error sending message to client userId=${client.userId}:`, error);
+        }
+      }
+    });
+    
+    console.log(`Broadcast complete: sent message to ${clientCount} clients of company ${companyId}`);
+  }
+  
+  // Send a message to a specific user
+  private sendToUser(userId: number, message: any) {
+    this.clients.forEach(client => {
+      if (client.userId === userId) {
+        client.ws.send(JSON.stringify(message));
+      }
+    });
+  }
+  
+  // Método de depuração para listar todos os clientes ativos
+  private logAllClients() {
+    console.log(`==== Current WebSocket Clients (${this.clients.size}) ====`);
+    this.clients.forEach((client, ws) => {
+      console.log(`Client: userId=${client.userId}, companyId=${client.companyId}, readyState=${ws.readyState}`);
+    });
+    console.log("========================================");
+  }
+}

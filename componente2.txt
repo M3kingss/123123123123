@@ -1,0 +1,174 @@
+2. Controlador WhatsApp - server/controllers/whatsapp.controller.ts
+
+import { Response } from 'express';
+import { z } from 'zod';
+import { whatsappManager } from '../services/whatsapp';
+import { storage } from '../storage';
+import { AuthenticatedRequest } from '../middleware/auth';
+
+// Start a new WhatsApp session
+export const startSession = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const companyId = req.companyId!;
+    
+    // Validate request body
+    const schema = z.object({
+      name: z.string().min(2),
+      phoneNumber: z.string().min(5)
+    });
+    
+    const validationResult = schema.safeParse(req.body);
+    if (!validationResult.success) {
+      return res.status(400).json({ 
+        message: 'Validation error', 
+        errors: validationResult.error.errors 
+      });
+    }
+    
+    const { name, phoneNumber } = validationResult.data;
+    
+    // Create a new WhatsApp connection in the database
+    const connection = await storage.createWhatsappConnection({
+      companyId,
+      name,
+      phoneNumber
+    });
+    
+    // Start WhatsApp session
+    await whatsappManager.startSession(connection.id, companyId);
+    
+    return res.json({ 
+      status: 'initializing', 
+      connectionId: connection.id,
+      message: 'WhatsApp session is initializing. Check WebSocket for QR code.'
+    });
+    
+  } catch (error) {
+    console.error('Start WhatsApp session error:', error);
+    return res.status(500).json({ message: 'Error starting WhatsApp session' });
+  }
+};
+
+// Get QR code for connection
+export const getQRCode = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const companyId = req.companyId!;
+    const connectionId = parseInt(req.params.connectionId);
+    
+    if (isNaN(connectionId)) {
+      return res.status(400).json({ message: 'Invalid connection ID' });
+    }
+    
+    // Check if connection belongs to this company
+    const connection = await storage.getWhatsappConnection(connectionId);
+    if (!connection || connection.companyId !== companyId) {
+      return res.status(404).json({ message: 'WhatsApp connection not found' });
+    }
+    
+    // Get QR code
+    const qrCode = await whatsappManager.getQrCode(connectionId);
+    
+    if (!qrCode) {
+      return res.status(404).json({ 
+        message: 'QR code not available. The connection might be already authenticated or still initializing.' 
+      });
+    }
+    
+    // If QR code is a string, treat it as a plain URL
+    if (typeof qrCode === 'string') {
+      return res.json({ 
+        qrCode,
+        qrCodeData: {
+          standard: qrCode,
+          whatsapp: `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(`whatsapp://qr/${encodeURIComponent(qrCode)}`)}&size=256x256&margin=4`,
+        }
+      });
+    }
+    
+    // Otherwise, return whatever format was stored
+    return res.json({ qrCode });
+    
+  } catch (error) {
+    console.error('Get QR code error:', error);
+    return res.status(500).json({ message: 'Error retrieving QR code' });
+  }
+};
+
+// Get all WhatsApp connections for a company
+export const getConnections = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const companyId = req.companyId!;
+    
+    // Get connections
+    const connections = await storage.getWhatsappConnectionsByCompany(companyId);
+    
+    // Enhance with statistics
+    const enhancedConnections = await Promise.all(connections.map(async (connection) => {
+      // Get contacts for this connection
+      const allContacts = await storage.getContactsByCompany(companyId);
+      const connectionContacts = allContacts.filter(c => c.connectionId === connection.id);
+      
+      // Get conversations
+      const allConversations = await storage.getConversationsByCompany(companyId);
+      const connectionConversations = allConversations.filter(c => c.contact.id && 
+        connectionContacts.some(contact => contact.id === c.contact.id));
+      
+      // Get active automations
+      const allAutomations = await storage.getAutomationsByCompany(companyId);
+      const connectionAutomations = allAutomations.filter(a => 
+        a.connectionIds === 'all' || 
+        (Array.isArray(a.connectionIds) && a.connectionIds.includes(connection.id))
+      );
+      
+      // Return enhanced connection
+      return {
+        ...connection,
+        stats: {
+          contacts: connectionContacts.length,
+          conversations: connectionConversations.length,
+          flows: 0, // This would be implemented in a real app
+          automations: connectionAutomations.filter(a => a.active).length
+        }
+      };
+    }));
+    
+    return res.json(enhancedConnections);
+    
+  } catch (error) {
+    console.error('Get connections error:', error);
+    return res.status(500).json({ message: 'Error retrieving WhatsApp connections' });
+  }
+};
+
+// Disconnect a WhatsApp session
+export const disconnectSession = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const companyId = req.companyId!;
+    const connectionId = parseInt(req.params.connectionId);
+    
+    if (isNaN(connectionId)) {
+      return res.status(400).json({ message: 'Invalid connection ID' });
+    }
+    
+    // Check if connection belongs to this company
+    const connection = await storage.getWhatsappConnection(connectionId);
+    if (!connection || connection.companyId !== companyId) {
+      return res.status(404).json({ message: 'WhatsApp connection not found' });
+    }
+    
+    // Disconnect session
+    await whatsappManager.disconnectSession(connectionId);
+    
+    // Update connection status
+    await storage.updateWhatsappConnectionStatus(connectionId, 'disconnected');
+    
+    return res.json({ 
+      status: 'disconnected', 
+      message: 'WhatsApp session has been disconnected' 
+    });
+    
+  } catch (error) {
+    console.error('Disconnect session error:', error);
+    return res.status(500).json({ message: 'Error disconnecting WhatsApp session' });
+  }
+};

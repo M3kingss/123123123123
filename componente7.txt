@@ -1,0 +1,141 @@
+7. Cliente API para WhatsApp - client/src/lib/api.ts
+
+import { apiRequest } from './queryClient';
+
+// Auth APIs
+export const loginUser = async (username: string, password: string) => {
+  const res = await apiRequest('POST', '/api/auth/login', { username, password });
+  const data = await res.json();
+  
+  // Store the token in localStorage
+  if (data.token) {
+    localStorage.setItem('authToken', data.token);
+  }
+  
+  return data;
+};
+
+export const registerUser = async (data: {
+  companyName: string;
+  username: string;
+  password: string;
+  name: string;
+  email: string;
+}) => {
+  const res = await apiRequest('POST', '/api/auth/register', data);
+  return res.json();
+};
+
+export const logoutUser = async () => {
+  const res = await apiRequest('POST', '/api/auth/logout', {});
+  return res.json();
+};
+
+export const getCurrentUser = async () => {
+  const res = await fetch('/api/auth/me', { credentials: 'include' });
+  if (!res.ok) {
+    if (res.status === 401) {
+      return null;
+    }
+    throw new Error('Failed to fetch current user');
+  }
+  return res.json();
+};
+
+// WhatsApp Connection APIs
+export const startWhatsappSession = async (data: { name: string, phoneNumber: string }) => {
+  const res = await apiRequest('POST', '/api/whatsapp/start-session', data);
+  return res.json();
+};
+
+export const getQRCode = async (connectionId: number) => {
+  const res = await fetch(`/api/whatsapp/qrcode/${connectionId}`, { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to get QR code');
+  }
+  return res.json();
+};
+
+export const getWhatsappConnections = async () => {
+  const res = await fetch('/api/whatsapp/connections', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch WhatsApp connections');
+  }
+  return res.json();
+};
+
+export const disconnectWhatsapp = async (connectionId: number) => {
+  const res = await apiRequest('POST', `/api/whatsapp/disconnect/${connectionId}`, {});
+  return res.json();
+};
+
+// Automation APIs
+export const getAutomations = async () => {
+  const res = await fetch('/api/automations', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch automations');
+  }
+  return res.json();
+};
+
+export const getAutomation = async (id: number) => {
+  const res = await fetch(`/api/automations/${id}`, { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch automation');
+  }
+  return res.json();
+};
+
+export const createAutomation = async (data: any) => {
+  const res = await apiRequest('POST', '/api/automations', data);
+  return res.json();
+};
+
+export const updateAutomation = async (id: number, data: any) => {
+  const res = await apiRequest('PUT', `/api/automations/${id}`, data);
+  return res.json();
+};
+
+export const deleteAutomation = async (id: number) => {
+  const res = await apiRequest('DELETE', `/api/automations/${id}`, {});
+  return res.json();
+};
+
+export const toggleAutomation = async (id: number, active: boolean) => {
+  const res = await apiRequest('PATCH', `/api/automations/${id}/toggle`, { active });
+  return res.json();
+};
+
+// Conversation & Contact APIs
+export const getConversations = async () => {
+  const res = await fetch('/api/conversations', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch conversations');
+  }
+  return res.json();
+};
+
+export const getContacts = async () => {
+  const res = await fetch('/api/contacts', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch contacts');
+  }
+  return res.json();
+};
+
+// Dashboard APIs
+export const getDashboardStats = async () => {
+  const res = await fetch('/api/dashboard/stats', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch dashboard stats');
+  }
+  return res.json();
+};
+
+export const getRecentActivity = async () => {
+  const res = await fetch('/api/dashboard/activity', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to fetch recent activity');
+  }
+  return res.json();
+};
